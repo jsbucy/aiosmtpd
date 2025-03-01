@@ -4,6 +4,7 @@
 import asyncio
 import asyncio.sslproto as sslproto
 import binascii
+import codecs
 import collections
 import enum
 import inspect
@@ -11,6 +12,7 @@ import logging
 import re
 import socket
 import ssl
+import string
 from base64 import b64decode, b64encode
 from email._header_value_parser import get_addr_spec, get_angle_addr
 from email.errors import HeaderParseError
@@ -330,7 +332,8 @@ class SMTP(asyncio.StreamReaderProtocol):
             command_call_limit: Union[int, Dict[str, int], None] = None,
             authenticator: Optional[AuthenticatorType] = None,
             proxy_protocol_timeout: Optional[Union[int, float]] = None,
-            loop: Optional[asyncio.AbstractEventLoop] = None
+            loop: Optional[asyncio.AbstractEventLoop] = None,
+            enable_BDAT: bool = False,
     ):
         self.__ident__ = ident or __ident__
         self.loop = loop if loop else make_loop()
@@ -459,6 +462,11 @@ class SMTP(asyncio.StreamReaderProtocol):
                 )
             else:
                 raise TypeError("command_call_limit must be int or Dict[str, int]")
+        self.enable_BDAT = enable_BDAT
+        self._chunks : List[bytes] = []
+        self.decoder : Optional[codecs.IncrementalDecoder] = None
+        self._bdat_status = None
+        self._bdat_bytes_read = 0
 
     def _create_session(self) -> Session:
         return Session(self.loop)
@@ -582,6 +590,10 @@ class SMTP(asyncio.StreamReaderProtocol):
     def _set_post_data_state(self):
         """Reset state variables to their post-DATA state."""
         self.envelope = self._create_envelope()
+        self.decoder = None
+        self.chunks = []
+        self._bdat_status = None
+        self._bdat_bytes_read = 0
 
     def _set_rset_state(self):
         """Reset all state variables except the greeting."""
@@ -852,6 +864,8 @@ class SMTP(asyncio.StreamReaderProtocol):
         if self.enable_SMTPUTF8:
             response.append('250-SMTPUTF8')
             self.command_size_limits['MAIL'] += 10
+        if self.enable_BDAT:
+            response.append('250-CHUNKING')
         if self.tls_context and not self._tls_protocol:
             response.append('250-STARTTLS')
         if not self._auth_require_tls or self._tls_protocol:
@@ -1420,19 +1434,24 @@ class SMTP(asyncio.StreamReaderProtocol):
                 # but the client ignores that and sends non-ascii anyway.
                 return '500 Error: strict ASCII mode', None
 
-
-    @syntax('DATA')
-    async def smtp_DATA(self, arg: str) -> None:
+    async def _check_data_preconditions(self):
         if await self.check_helo_needed():
-            return
+            return False
         if await self.check_auth_needed("DATA"):
-            return
+            return False
         assert self.envelope is not None
         if not self.envelope.rcpt_tos:
             await self.push('503 Error: need RCPT command')
-            return
+            return False
+        return True
+
+    @syntax('DATA')
+    async def smtp_DATA(self, arg: str) -> None:
         if arg:
             await self.push('501 Syntax: DATA')
+            return
+
+        if not await self._check_data_preconditions():
             return
 
         await self.push('354 End data with <CR><LF>.<CR><LF>')
@@ -1530,6 +1549,9 @@ class SMTP(asyncio.StreamReaderProtocol):
             await self.push('250 OK' if status is MISSING else status)
             return
 
+        return await self._emit_data(data)
+
+    async def _emit_data(self, data : List[bytes]):
         original_content: bytes = EMPTYBYTES.join(data)
         # Discard data immediately to prevent memory pressure
         data *= 0
@@ -1568,6 +1590,98 @@ class SMTP(asyncio.StreamReaderProtocol):
                     status = MISSING
         self._set_post_data_state()
         await self.push('250 OK' if status is MISSING else status)
+
+    def _parse_bdat_args(self, arg) -> Tuple[Optional[str],Optional[Tuple[int, bool]]]:
+        args = arg.split(' ')
+        if len(args) < 1 or len(args) > 2:
+            return 'num args', None
+        if not args[0].isdigit():
+            return 'len', None
+        last = False
+        if len(args) == 2:
+            if args[1].lower() != 'last':
+                return 'last'
+            else:
+                last = True
+        try:
+            chunk_len = int(args[0])
+        except ValueError:
+            return 'len value', None
+        # TODO error out here if chunk_len is way too big?
+        return None, (chunk_len, last)
+
+    async def smtp_BDAT(self, arg: str):
+        err, (chunk_len, last) = self._parse_bdat_args(arg)
+        if err:
+            # a BDAT syntax error desyncs SMTP: close the connection
+            await self._push('555-5.2.2 Syntax error: ' + err + ', closing connection')
+            self._writer.close()
+            return
+
+        # TODO this condition is a client bug but we probably
+        # shouldn't hang up here. Need to refactor this to return the
+        # error so we can save it in self._bdat_status here rather
+        # than putting it on the wire immediately.
+        if self._bdat_bytes_read == 0 and not await self._check_data_preconditions():
+            self._writer.close()
+            return
+
+        if self._bdat_bytes_read + chunk_len > self.data_size_limit:
+            self._bdat_status = '552 Error: Too much mail data'
+
+        if self._decode_data and self.decoder is None and 'DATA_CHUNK' in self._handle_hooks:
+            # We use an incremental decoder here since a client
+            # probably won't align BDAT chunks on utf8 code point
+            # boundaries.
+            if self.enable_SMTPUTF8:
+                self.decoder = codecs.getincrementaldecoder(
+                    'utf-8')(errors='surrogateescape')
+            else:
+                self.decoder = codecs.getincrementaldecoder(
+                    'ascii')(errors='strict')
+
+        data_read = 0
+        while data_read < chunk_len:
+            try:
+                data = await self._reader.read(min(2**16, chunk_len - data_read))
+            except asyncio.CancelledError:
+                # The connection got reset during the DATA command.
+                log.info('Connection lost during DATA')
+                self._writer.close()
+                raise
+
+            data_read += len(data)
+            self._bdat_bytes_read += len(data)
+            if "DATA_CHUNK" in self._handle_hooks:
+                last_last = last and data_read == chunk_len
+                content = None
+                if self.decoder is not None:
+                    try:
+                        content = self.decoder.decode(data, last_last)
+                    except UnicodeDecodeError:
+                        self._bdat_status = '500 Error: strict ASCII mode'
+                if self._bdat_status is None:
+                    log.debug(data)
+                    self._bdat_status = await self._call_handler_hook(
+                        'DATA_CHUNK', data, content, last_last)
+            else:
+                self._chunks.append(data)
+
+        if self._bdat_status is not None:
+            await self.push(self._bdat_status)
+            self._set_post_data_state()
+            return
+
+        if not last:
+            await self.push(b'250 %d octets received' % chunk_len)
+            return
+
+        if "DATA_CHUNK" in self._handle_hooks:
+            await self.push(b'250 OK' if self._bdat_status is None else self._bdat_status)
+            self._set_post_data_state()
+            return
+
+        return await self._emit_data(self._chunks)
 
     # Commands that have not been implemented.
     async def smtp_EXPN(self, arg: str):

@@ -1682,6 +1682,44 @@ class TestSMTPWithController(_CommonMethods):
         assert envelope.original_content == b'hello, \r\n\xe4\xb8\x96\xe7\x95\x8c!\r\n'
         assert envelope.content == 'hello, \r\n世界!\r\n'
 
+    def _do_test_bdat(self, plain_controller, client):
+        handler = plain_controller.handler
+        self._ehlo(client)
+        client.send(b'MAIL FROM:<anne@example.com>\r\n')
+        assert client.getreply() == S.S250_OK
+        client.send(b'RCPT TO:<bart@example.com>\r\n')
+        assert client.getreply() == S.S250_OK
+        chunks = [
+            b'hello, \r\n',
+            b'\xe4\xb8\x96\xe7\x95\x8c!\r\n',
+        ]
+        for i,chunk in enumerate(chunks):
+            cmd = b'BDAT %d' % len(chunks[0])
+            last = i == len(chunks) - 1
+            if last:
+                cmd += b' LAST'
+            cmd += b'\r\n'
+            client.send(cmd)
+            client.send(chunk)
+            if not last:
+                assert client.getreply() == (250, b'%d octets received' % len(chunk))
+            else:
+                assert client.getreply() == S.S250_OK
+
+        assert len(handler.box) == 1
+        envelope = handler.box[0]
+        assert envelope.original_content == b'hello, \r\n\xe4\xb8\x96\xe7\x95\x8c!\r\n'
+        assert envelope.content == 'hello, \r\n世界!\r\n'
+
+    @controller_data(enable_BDAT=True, decode_data=True)
+    @handler_data(class_=ReceivingHandler)
+    def test_bdat(self, plain_controller, client):
+        self._do_test_bdat(plain_controller, client)
+
+    @controller_data(enable_BDAT=True, decode_data=True)
+    @handler_data(class_=ChunkedReceivingHandler)
+    def test_bdat_chunked(self, plain_controller, client):
+        self._do_test_bdat(plain_controller, client)
 
 class TestCustomization(_CommonMethods):
     @controller_data(class_=CustomHostnameController)

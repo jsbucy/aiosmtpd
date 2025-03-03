@@ -803,8 +803,7 @@ class SMTP(asyncio.StreamReaderProtocol):
                         # shouldn't be None, but pytype isn't able to infer that
                         # so ignore the error related to wrong argument types.
                         await self.push(status)  # pytype: disable=wrong-arg-types
-
-    async def check_helo_needed(self, helo: str = "HELO") -> bool:
+    def _check_helo_needed(self, helo: str = "HELO") -> Optional[str]:
         """
         Check if HELO/EHLO is needed.
 
@@ -813,11 +812,22 @@ class SMTP(asyncio.StreamReaderProtocol):
         """
         assert self.session is not None
         if not self.session.host_name:
-            await self.push(f'503 Error: send {helo} first')
+            return f'503 Error: send {helo} first'
+
+
+    async def check_helo_needed(self, helo: str = "HELO") -> bool:
+        """
+        Check if HELO/EHLO is needed.
+
+        :param helo: The actual string of HELO/EHLO
+        :return: True if HELO/EHLO is needed
+        """
+        if err := self._check_helo_needed(helo):
+            await self.push(err)
             return True
         return False
 
-    async def check_auth_needed(self, caller_method: str) -> bool:
+    def _check_auth_needed(self, caller_method: str) -> Optional[str]:
         """
         Check if AUTH is needed.
 
@@ -827,7 +837,18 @@ class SMTP(asyncio.StreamReaderProtocol):
         assert self.session is not None
         if self._auth_required and not self.session.authenticated:
             log.info(f'{caller_method}: Authentication required')
-            await self.push('530 5.7.0 Authentication required')
+            return '530 5.7.0 Authentication required'
+
+    async def check_auth_needed(self, caller_method: str) -> bool:
+        """
+        Check if AUTH is needed.
+
+        :param caller_method: The SMTP method needing a check (for logging)
+        :return: True if AUTH is needed
+        """
+        assert self.session is not None
+        if err := self._check_auth_needed(caller_method):
+            await self.push(err)
             return True
         return False
 
@@ -1434,16 +1455,14 @@ class SMTP(asyncio.StreamReaderProtocol):
                 # but the client ignores that and sends non-ascii anyway.
                 return '500 Error: strict ASCII mode', None
 
-    async def _check_data_preconditions(self):
-        if await self.check_helo_needed():
-            return False
-        if await self.check_auth_needed("DATA"):
-            return False
+    def _check_data_preconditions(self) -> Optional[str]:
+        if err := self._check_helo_needed():
+            return err
+        if err := self._check_auth_needed("DATA"):
+            return err
         assert self.envelope is not None
         if not self.envelope.rcpt_tos:
-            await self.push('503 Error: need RCPT command')
-            return False
-        return True
+            return '503 Error: need RCPT command'
 
     @syntax('DATA')
     async def smtp_DATA(self, arg: str) -> None:
@@ -1451,7 +1470,8 @@ class SMTP(asyncio.StreamReaderProtocol):
             await self.push('501 Syntax: DATA')
             return
 
-        if not await self._check_data_preconditions():
+        if err := self._check_data_preconditions():
+            await self.push(err)
             return
 
         await self.push('354 End data with <CR><LF>.<CR><LF>')
@@ -1591,7 +1611,9 @@ class SMTP(asyncio.StreamReaderProtocol):
         self._set_post_data_state()
         await self.push('250 OK' if status is MISSING else status)
 
-    def _parse_bdat_args(self, arg) -> Tuple[Optional[str],Optional[Tuple[int, bool]]]:
+    # -> err, (bdat_len, last)
+    def _parse_bdat_args(self, arg
+                         ) -> Tuple[Optional[str],Optional[Tuple[int, bool]]]:
         args = arg.split(' ')
         if len(args) < 1 or len(args) > 2:
             return 'num args', None
@@ -1600,7 +1622,7 @@ class SMTP(asyncio.StreamReaderProtocol):
         last = False
         if len(args) == 2:
             if args[1].lower() != 'last':
-                return 'last'
+                return 'last', None
             else:
                 last = True
         try:
@@ -1611,20 +1633,28 @@ class SMTP(asyncio.StreamReaderProtocol):
         return None, (chunk_len, last)
 
     async def smtp_BDAT(self, arg: str):
-        err, (chunk_len, last) = self._parse_bdat_args(arg)
+        err, parsed_args = self._parse_bdat_args(arg)
         if err:
             # a BDAT syntax error desyncs SMTP: close the connection
-            await self._push('555-5.2.2 Syntax error: ' + err + ', closing connection')
+            await self.push('555 5.2.2 Syntax error: ' + err + ', closing connection')
             self._writer.close()
             return
+        chunk_len, last = parsed_args
 
-        # TODO this condition is a client bug but we probably
-        # shouldn't hang up here. Need to refactor this to return the
-        # error so we can save it in self._bdat_status here rather
-        # than putting it on the wire immediately.
-        if self._bdat_bytes_read == 0 and not await self._check_data_preconditions():
-            self._writer.close()
-            return
+        if self._bdat_bytes_read == 0:
+            # TODO/NOTE: BDAT unconditionally changes the state of the
+            # stream so ordinarily we have to consume the exact number
+            # of bytes from the client to remain in sync even if it
+            # was an out-of-sequence command. Both this error and the
+            # following length check result in a state where we will
+            # consume and discard chunk_len from the client no matter
+            # how long it is. Possibly there should be some moderately
+            # large threshold (say 1M?) where we return an immediate
+            # error and close the connection. cf LimitOverrunError in
+            # _handle_client() and smtp_DATA(). In the absence of
+            # PIPELINING, an out-of-sequence BDAT is always a client
+            # bug.
+            self._bdat_status = self._check_data_preconditions()
 
         if self._bdat_bytes_read + chunk_len > self.data_size_limit:
             self._bdat_status = '552 Error: Too much mail data'

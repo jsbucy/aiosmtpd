@@ -1439,13 +1439,13 @@ class SMTP(asyncio.StreamReaderProtocol):
 
         chunking = "DATA_CHUNK" in self._handle_hooks
 
-        status = '354 End data with <CR><LF>.<CR><LF>'
+        data_status = '354 End data with <CR><LF>.<CR><LF>'
         if chunking and ((s := await self._call_handler_hook(
                 'DATA_CHUNK', b'',
                 '' if self._decode_data else None, False)) is not None):
-            status = s
-        await self.push(status)
-        if status[0:3] != '354':
+            data_status = s
+        await self.push(data_status)
+        if data_status[0:3] != '354':
             return
         data = BytesIO()
 

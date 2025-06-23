@@ -1512,6 +1512,13 @@ class SMTP(asyncio.StreamReaderProtocol):
                 data.write(line)
                 continue
 
+            # reset timeout on every read so it can take as long as it
+            # takes as long as the client keeps making forward
+            # progress
+            # TODO we could do this for !chunking under control of a
+            # flag so as not to change the behavior unexpectedly?
+            self._reset_timeout()
+
             if data.tell() + len(line) > self._chunk_size:
                 data.seek(0)
                 chunk = data.read()

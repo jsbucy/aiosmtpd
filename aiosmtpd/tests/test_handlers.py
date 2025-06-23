@@ -11,7 +11,7 @@ from pathlib import Path
 from smtplib import SMTPDataError, SMTPRecipientsRefused
 from textwrap import dedent
 from types import SimpleNamespace
-from typing import AnyStr, Callable, Generator, Type, TypeVar, Union
+from typing import AnyStr, Callable, Generator, Optional, Type, TypeVar, Union
 
 import pytest
 

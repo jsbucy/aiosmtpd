@@ -61,7 +61,7 @@ class ReceivingHandler:
 class ChunkedReceivingHandler:
     def __init__(self):
         self.box: List[Envelope] = []
-        self.responses: List[str] = [None, '250 OK']
+        self.responses: List[Optional[str]] = [None, '250 OK']
         self.sent_response = False
 
     async def handle_DATA_CHUNK(

@@ -1520,11 +1520,10 @@ class SMTP(asyncio.StreamReaderProtocol):
                 decoded_line = None
                 if status is MISSING:
                     status, decoded_line = self._decode_line(chunk)
-                if status is MISSING:
-                    new_status = await self._call_handler_hook(
-                        'DATA_CHUNK', chunk, decoded_line, False)
-                    if new_status is not None:
-                        status = new_status
+                if status is MISSING and (
+                    (s := await self._call_handler_hook(
+                        'DATA_CHUNK', chunk, decoded_line, False)) is not None):
+                    status = s
             data.write(line)
 
         # Day of reckoning! Let's take care of those out-of-nominal situations
@@ -1587,9 +1586,8 @@ class SMTP(asyncio.StreamReaderProtocol):
                 else:
                     old_status = self.event_handler.process_message(*args)
                 # The deprecated API can return None which means, return the
-                # default status.  Don't worry about coverage for this case as
-                # it's a deprecated API that will go away after 1.0.
-                if old_status is None:                  # pragma: nocover
+                # default status.
+                if old_status is None:
                     status = MISSING
                 else:
                     status = old_status

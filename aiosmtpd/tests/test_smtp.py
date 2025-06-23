@@ -1723,7 +1723,6 @@ class TestSMTPWithController(_CommonMethods):
         assert client.getreply() == S.S250_OK
         client.send(b'DATA\r\n')
         assert client.getreply() == (550, b'bad')
-
         assert len(handler.box) == 0
 
     @controller_data(decode_data=True)

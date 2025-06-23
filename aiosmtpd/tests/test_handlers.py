@@ -187,9 +187,10 @@ class DeprecatedHookController(Controller):
 
 
 class DeprecatedHandler:
+    def __init__(self):
+        self.response: Optional[str] = None
     def process_message(self, peer, mailfrom, rcpttos, data, **kws):
-        pass
-
+        return self.response
 
 class AsyncDeprecatedHandler:
     async def process_message(self, peer, mailfrom, rcpttos, data, **kws):
@@ -987,10 +988,19 @@ class TestDeprecation:
             )
 
     @handler_data(class_=DeprecatedHandler)
+    def test_process_message_no_response(self, plain_controller, client):
+        """handler.process_message is Deprecated"""
+        handler = plain_controller.handler
+        assert isinstance(handler, DeprecatedHandler)
+        controller = plain_controller
+        self._process_message_testing(controller, client)
+
+    @handler_data(class_=DeprecatedHandler)
     def test_process_message(self, plain_controller, client):
         """handler.process_message is Deprecated"""
         handler = plain_controller.handler
         assert isinstance(handler, DeprecatedHandler)
+        handler.response = '250 ok'
         controller = plain_controller
         self._process_message_testing(controller, client)
 

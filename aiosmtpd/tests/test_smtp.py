@@ -1667,6 +1667,7 @@ class TestSMTPWithController(_CommonMethods):
         smtpd: Server = plain_controller.smtpd
         smtpd._chunk_size = 10
         handler = plain_controller.handler
+        handler.responses = [None, None, '250 OK']
         self._ehlo(client)
         client.send(b'MAIL FROM:<anne@example.com>\r\n')
         assert client.getreply() == S.S250_OK
@@ -1690,6 +1691,7 @@ class TestSMTPWithController(_CommonMethods):
         smtpd: Server = plain_controller.smtpd
         smtpd._chunk_size = 10
         handler = plain_controller.handler
+        handler.responses = [None, None, '250 OK']
         self._ehlo(client)
         client.send(b'MAIL FROM:<anne@example.com>\r\n')
         assert client.getreply() == S.S250_OK
@@ -1709,12 +1711,28 @@ class TestSMTPWithController(_CommonMethods):
 
     @controller_data(decode_data=True)
     @handler_data(class_=ChunkedReceivingHandler)
-    def test_chunked_receiving_early_err(self, plain_controller, client):
+    def test_chunked_receiving_data_response_err(self, plain_controller, client):
         smtpd: Server = plain_controller.smtpd
         smtpd._chunk_size = 10
         handler = plain_controller.handler
-        handler.response = '550 bad'
-        handler.respond_last = False
+        handler.responses = ['550 bad']
+        self._ehlo(client)
+        client.send(b'MAIL FROM:<anne@example.com>\r\n')
+        assert client.getreply() == S.S250_OK
+        client.send(b'RCPT TO:<bart@example.com>\r\n')
+        assert client.getreply() == S.S250_OK
+        client.send(b'DATA\r\n')
+        assert client.getreply() == (550, b'bad')
+
+        assert len(handler.box) == 0
+
+    @controller_data(decode_data=True)
+    @handler_data(class_=ChunkedReceivingHandler)
+    def test_chunked_receiving_non_last_err(self, plain_controller, client):
+        smtpd: Server = plain_controller.smtpd
+        smtpd._chunk_size = 10
+        handler = plain_controller.handler
+        handler.responses = [None, '550 bad']
         self._ehlo(client)
         client.send(b'MAIL FROM:<anne@example.com>\r\n')
         assert client.getreply() == S.S250_OK
@@ -1736,6 +1754,7 @@ class TestSMTPWithController(_CommonMethods):
         smtpd: Server = plain_controller.smtpd
         smtpd._chunk_size = 10
         handler = plain_controller.handler
+        handler.responses = [None, None]
         self._ehlo(client)
         client.send(b'MAIL FROM:<anne@example.com>\r\n')
         assert client.getreply() == S.S250_OK

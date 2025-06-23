@@ -1437,7 +1437,16 @@ class SMTP(asyncio.StreamReaderProtocol):
             await self.push('501 Syntax: DATA')
             return
 
-        await self.push('354 End data with <CR><LF>.<CR><LF>')
+        chunking = "DATA_CHUNK" in self._handle_hooks
+
+        status = '354 End data with <CR><LF>.<CR><LF>'
+        if chunking and ((s := await self._call_handler_hook(
+                'DATA_CHUNK', b'',
+                '' if self._decode_data else None, False)) is not None):
+            status = s
+        await self.push(status)
+        if status[0:3] != '354':
+            return
         data = BytesIO()
 
         num_bytes: int = 0
@@ -1445,8 +1454,6 @@ class SMTP(asyncio.StreamReaderProtocol):
         state: _DataState = _DataState.NOMINAL
         status : Union[_Missing, bytes] = MISSING
         DOT = ord('.')
-
-        chunking = "DATA_CHUNK" in self._handle_hooks
 
         while self.transport is not None:           # pragma: nobranch
             # Since eof_received cancels this coroutine,

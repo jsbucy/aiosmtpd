@@ -61,8 +61,7 @@ class ReceivingHandler:
 class ChunkedReceivingHandler:
     def __init__(self):
         self.box: List[Envelope] = []
-        self.response: Optional[str] = '250 OK'
-        self.respond_last = True
+        self.responses: List[str] = [None, '250 OK']
         self.sent_response = False
 
     async def handle_DATA_CHUNK(
@@ -70,7 +69,6 @@ class ChunkedReceivingHandler:
             data: bytes, text: Optional[str], last: bool
     ) -> Optional[str]:
         assert not self.sent_response
-        assert bool(data)
         if text is not None:
             if envelope.content is None:
                 envelope.content = ''
@@ -87,11 +85,10 @@ class ChunkedReceivingHandler:
 
         if last:
             self.box.append(envelope)
-        if not last and self.respond_last:
-            return None
-        if self.response is not None:
+        resp = self.responses.pop(0)
+        if resp is not None:
             self.sent_response = True
-        return self.response
+        return resp
 
 
 def catchup_delay(delay: float = ASYNCIO_CATCHUP_DELAY):

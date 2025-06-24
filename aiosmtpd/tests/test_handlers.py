@@ -189,8 +189,10 @@ class DeprecatedHookController(Controller):
 class DeprecatedHandler:
     def __init__(self):
         self.response: Optional[str] = None
+
     def process_message(self, peer, mailfrom, rcpttos, data, **kws):
         return self.response
+
 
 class AsyncDeprecatedHandler:
     async def process_message(self, peer, mailfrom, rcpttos, data, **kws):
